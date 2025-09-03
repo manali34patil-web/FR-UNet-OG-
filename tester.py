@@ -9,23 +9,23 @@ from loguru import logger
 from tqdm import tqdm
 from trainer import Trainer
 from utils.helpers import dir_exists, remove_files, double_threshold_iteration, double_threshold_iteration_fast
-from utils.metrics import AverageMeter, get_metrics, get_metrics, count_connect_component
+from utils.metrics import AverageMeter, get_metrics, count_connect_component
 import ttach as tta
 
 
 class Tester(Trainer):
-    def __init__(self, model, loss, CFG, checkpoint, test_loader, dataset_path, show=False):
-        # super(Trainer, self).__init__()
+    def __init__(self, model, loss, CFG, test_loader, dataset_path, show=False):
         self.loss = loss
         self.CFG = CFG
         self.test_loader = test_loader
-        self.model = nn.DataParallel(model.cuda())
+        self.model = nn.DataParallel(model.cuda())   # ✅ model already has weights
         self.dataset_path = dataset_path
         self.show = show
-        self.model.load_state_dict(checkpoint['state_dict'])
+
         if self.show:
             dir_exists("save_picture")
             remove_files("save_picture")
+
         cudnn.benchmark = True
 
     def test(self):
@@ -46,31 +46,33 @@ class Tester(Trainer):
                 self.total_loss.update(loss.item())
                 self.batch_time.update(time.time() - tic)
 
+                # ✅ Always define H, W
                 if self.dataset_path.endswith("DRIVE"):
                     H, W = 584, 565
                 elif self.dataset_path.endswith("CHASEDB1"):
                     H, W = 960, 999
                 elif self.dataset_path.endswith("DCA1"):
                     H, W = 300, 300
+                else:
+                    # fallback: use actual image size
+                    H, W = img.shape[2], img.shape[3]
 
                 if not self.dataset_path.endswith("CHUAC"):
                     img = TF.crop(img, 0, 0, H, W)
                     gt = TF.crop(gt, 0, 0, H, W)
                     pre = TF.crop(pre, 0, 0, H, W)
-                img = img[0,0,...]
-                gt = gt[0,0,...]
-                pre = pre[0,0,...]
+
+                img = img[0, 0, ...]
+                gt = gt[0, 0, ...]
+                pre = pre[0, 0, ...]
+
                 if self.show:
                     predict = torch.sigmoid(pre).cpu().detach().numpy()
                     predict_b = np.where(predict >= self.CFG.threshold, 1, 0)
-                    cv2.imwrite(
-                        f"save_picture/img{i}.png", np.uint8(img.cpu().numpy()*255))
-                    cv2.imwrite(
-                        f"save_picture/gt{i}.png", np.uint8(gt.cpu().numpy()*255))
-                    cv2.imwrite(
-                        f"save_picture/pre{i}.png", np.uint8(predict*255))
-                    cv2.imwrite(
-                        f"save_picture/pre_b{i}.png", np.uint8(predict_b*255))
+                    cv2.imwrite(f"save_picture/img{i}.png", np.uint8(img.cpu().numpy() * 255))
+                    cv2.imwrite(f"save_picture/gt{i}.png", np.uint8(gt.cpu().numpy() * 255))
+                    cv2.imwrite(f"save_picture/pre{i}.png", np.uint8(predict * 255))
+                    cv2.imwrite(f"save_picture/pre_b{i}.png", np.uint8(predict_b * 255))
 
                 if self.CFG.DTI:
                     if self.CFG.fast_DTI:
@@ -79,20 +81,21 @@ class Tester(Trainer):
                     else:
                         pre_DTI = double_threshold_iteration(
                             i, pre, self.CFG.threshold, self.CFG.threshold_low, True)
-                    self._metrics_update(
-                        *get_metrics(pre, gt, predict_b=pre_DTI).values())
+                    self._metrics_update(*get_metrics(pre, gt, predict_b=pre_DTI).values())
                     if self.CFG.CCC:
                         self.CCC.update(count_connect_component(pre_DTI, gt))
                 else:
-                    self._metrics_update(
-                        *get_metrics(pre, gt, self.CFG.threshold).values())
+                    self._metrics_update(*get_metrics(pre, gt, self.CFG.threshold).values())
                     if self.CFG.CCC:
-                        self.CCC.update(count_connect_component(
-                            pre, gt, threshold=self.CFG.threshold))
+                        self.CCC.update(count_connect_component(pre, gt, threshold=self.CFG.threshold))
+
                 tbar.set_description(
-                    'TEST ({}) | Loss: {:.4f} | AUC {:.4f} F1 {:.4f} Acc {:.4f}  Sen {:.4f} Spe {:.4f} Pre {:.4f} IOU {:.4f} |B {:.2f} D {:.2f} |'.format(
-                        i, self.total_loss.average, *self._metrics_ave().values(), self.batch_time.average, self.data_time.average))
+                    'TEST ({}) | Loss: {:.4f} | AUC {:.4f} F1 {:.4f} Acc {:.4f} '
+                    'Sen {:.4f} Spe {:.4f} Pre {:.4f} IOU {:.4f} |B {:.2f} D {:.2f} |'.format(
+                        i, self.total_loss.average, *self._metrics_ave().values(),
+                        self.batch_time.average, self.data_time.average))
                 tic = time.time()
+
         logger.info(f"###### TEST EVALUATION ######")
         logger.info(f'test time:  {self.batch_time.average}')
         logger.info(f'     loss:  {self.total_loss.average}')
@@ -100,4 +103,3 @@ class Tester(Trainer):
             logger.info(f'     CCC:  {self.CCC.average}')
         for k, v in self._metrics_ave().items():
             logger.info(f'{str(k):5s}: {v}')
-        
