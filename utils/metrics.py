@@ -40,6 +40,11 @@ class AverageMeter(object):
         return np.round(self.avg, 4)
 
 
+def safe_divide(numerator, denominator, eps=1e-8):
+    """Avoid division by zero by adding a tiny epsilon."""
+    return numerator / (denominator + eps)
+
+
 def get_metrics(predict, target, threshold=None, predict_b=None):
     predict = torch.sigmoid(predict).cpu().detach().numpy().flatten()
     if predict_b is not None:
@@ -50,36 +55,47 @@ def get_metrics(predict, target, threshold=None, predict_b=None):
         target = target.cpu().detach().numpy().flatten()
     else:
         target = target.flatten()
+
     tp = (predict_b * target).sum()
     tn = ((1 - predict_b) * (1 - target)).sum()
     fp = ((1 - target) * predict_b).sum()
     fn = ((1 - predict_b) * target).sum()
-    auc = roc_auc_score(target, predict)
-    acc = (tp + tn) / (tp + fp + fn + tn)
-    pre = tp / (tp + fp)
-    sen = tp / (tp + fn)
-    spe = tn / (tn + fp)
-    iou = tp / (tp + fp + fn)
-    f1 = 2 * pre * sen / (pre + sen)
+
+    # Handle edge case for AUC: if target has only 1 class
+    try:
+        auc = roc_auc_score(target, predict)
+    except ValueError:
+        auc = 0.5  # neutral AUC if only one class present
+
+    acc = safe_divide(tp + tn, tp + fp + fn + tn)
+    pre = safe_divide(tp, tp + fp)
+    sen = safe_divide(tp, tp + fn)
+    spe = safe_divide(tn, tn + fp)
+    iou = safe_divide(tp, tp + fp + fn)
+    f1 = safe_divide(2 * pre * sen, pre + sen)
+
     return {
         "AUC": np.round(auc, 4),
         "F1": np.round(f1, 4),
         "Acc": np.round(acc, 4),
         "Sen": np.round(sen, 4),
         "Spe": np.round(spe, 4),
-        "pre": np.round(pre, 4),
-        "IOU": np.round(iou, 4),
+        "Pre": np.round(pre, 4),
+        "IoU": np.round(iou, 4),
     }
 
 
 def count_connect_component(predict, target, threshold=None, connectivity=8):
-    if threshold != None:
+    if threshold is not None:
         predict = torch.sigmoid(predict).cpu().detach().numpy()
         predict = np.where(predict >= threshold, 1, 0)
     if torch.is_tensor(target):
         target = target.cpu().detach().numpy()
-    pre_n, _, _, _ = cv2.connectedComponentsWithStats(np.asarray(
-        predict, dtype=np.uint8)*255, connectivity=connectivity)
-    gt_n, _, _, _ = cv2.connectedComponentsWithStats(np.asarray(
-        target, dtype=np.uint8)*255, connectivity=connectivity)
-    return pre_n/gt_n
+    pre_n, _, _, _ = cv2.connectedComponentsWithStats(
+        np.asarray(predict, dtype=np.uint8) * 255, connectivity=connectivity
+    )
+    gt_n, _, _, _ = cv2.connectedComponentsWithStats(
+        np.asarray(target, dtype=np.uint8) * 255, connectivity=connectivity
+    )
+    return safe_divide(pre_n, gt_n)
+
